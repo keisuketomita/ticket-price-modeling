@@ -4,9 +4,10 @@ require 'holiday_japan' #gem install holiday_japan
 require 'active_support/all' # 数字の3桁区切り(.to_s(:delimited))に必要
 
 class TicketPrice
-  attr_accessor :price
+  attr_reader :price
   def initialize
     @price = 0
+    @skip_key = 0
   end
   def customer_type(type)
     customer_type = {
@@ -34,36 +35,88 @@ class TicketPrice
     else
     end
   end
-  def movie_day?(date)
-    date.day == 1
+  def movie_day?(datetime)
+    datetime.day == 1
   end
-  def rate_time?(datetime)
-    datetime >= 20
+  def movie_day_tuning(type)
+    return if @skip_key == 1
+    case type
+    when 7, 8, 9
+      @price += 100
+    end
   end
-  def holiday?(date, datetime)
-    HolidayJapan.check(date) || ( datetime.wday == 0 || datetime.wday == 6 )
+  def time_zone?(start_hour)
+    if start_hour < 20
+      return 0
+    else
+      return 1
+    end
   end
-  def wday_tuning
-    @price += 300
+  def time_zone_tuning(start_hour, type)
+    return if @skip_key == 1
+    case type
+    when 7
+      case self.time_zone?(start_hour)
+      when 0
+        @price += 800
+      when 1
+        @price += 300
+      end
+    when 8
+      case self.time_zone?(start_hour)
+      when 0
+        @price += 500
+      when 1
+        @price += 300
+      end
+    when 9
+      case self.time_zone?(start_hour)
+      when 0
+        @price += 300
+      when 1
+      end
+    end
+  end
+  def holiday?(date, datetime, type)
+    unless HolidayJapan.check(date) || ( datetime.wday == 0 || datetime.wday == 6 )
+      case type
+      when 9
+        @skip_key = 1
+      end
+    end
   end
 end
 
-# class Sales
-#   attr_accessor :all_summary, :title_summary, :guest_summary
-#   def initialize
-#     @all_summary = 0
-#     @title_summary = {}
-#     @guest_summary = {}
-#   end
-#   def all_sales(sales)
-#     @all_summary = sales
-#   end
-# end
+class Sales
+  attr_accessor :all_summary, :title_summary, :guest_summary
+  def initialize
+    @all_summary = 0
+    @title_summary = {}
+    @guest_summary = {}
+  end
+  def all_sales(sales)
+    @all_summary += sales
+  end
+  def title_sales(title_hash, title)
+    if @title_summary.key?(title)
+      @title_summary = @title_summary.merge(title_hash) {|key, oldval, newval| newval + oldval}
+    else
+      @title_summary[title] = title_hash[title]
+    end
+  end
+  def guest_sales(guest_hash, guest)
+    if @guest_summary.key?(guest)
+      @guest_summary = @guest_summary.merge(guest_hash) {|key, oldval, newval| newval + oldval}
+    else
+      @guest_summary[guest] = guest_hash[guest]
+    end
+  end
+end
 
-@all_sales = 0
-@title_summary = {}
-@guest_summary = {}
-CSV.foreach("data.csv") do |row|
+
+@sales = Sales.new
+array = CSV.read("data.csv")
+array.each_with_index do |row, index|
   tp = TicketPrice.new
   datetime = DateTime.parse(row[0])
   date = Date.parse(row[0])
@@ -73,63 +126,36 @@ CSV.foreach("data.csv") do |row|
   # step2 料金プランの調整
   tp.customer_tuning(customer_type)
   # step3 映画の日、時間帯、曜日による調整
-  case customer_type
-  when 7
-    if tp.movie_day?(datetime)
-      tp.price += 100
-    else
-      tp.price += tp.rate_time?(datetime.hour) ? 300 : 800
-    end
-  when 8
-    if tp.movie_day?(datetime)
-      tp.price += 100
-    else
-      tp.price += tp.rate_time?(datetime.hour) ? 300 : 500
-    end
-  when 9
-    if tp.holiday?(date, datetime)
-      if tp.movie_day?(datetime)
-        tp.price += 100
-      else
-        tp.price += 300 unless tp.rate_time?(datetime.hour)
-      end
-    end
-  else
-  end
+  tp.holiday?(date, datetime, customer_type)
+  tp.movie_day?(datetime) ? tp.movie_day_tuning(customer_type) : tp.time_zone_tuning(datetime.hour, customer_type)
 
   # 集計(全作品)
-  @all_sales += tp.price
+  @sales.all_sales(tp.price)
 
   # 集計(作品別売上)
-  title = {row[1] => tp.price}
-  if @title_summary.key?(row[1])
-    @title_summary = @title_summary.merge(title) {|key, oldval, newval| newval + oldval}
-  else
-    @title_summary[row[1]] = tp.price
-  end
+  title_hash = {row[1] => tp.price}
+  @sales.title_sales(title_hash, row[1])
   title = {}
 
   # 集計(料金タイプ別売上)
-  guest = {row[2] => tp.price}
-  if @guest_summary.key?(row[2])
-    @guest_summary = @guest_summary.merge(guest) {|key, oldval, newval| newval + oldval}
-  else
-    @guest_summary[row[2]] = tp.price
-  end
+  guest_hash = {row[2] => tp.price}
+  @sales.guest_sales(guest_hash, row[2])
   guest = {}
 
-end
-p "▼サマリー"
-p "#{@all_sales.to_s(:delimited)}円"
-p "***"
+  if index == array.size - 1
+    puts "▼サマリー"
+    puts "#{@sales.all_summary.to_s(:delimited)}円"
+    puts ""
 
-p "▼作品別売上"
-@title_summary.each do |key, value|
-  puts key.to_s + ": " + "#{value.to_s(:delimited)}円"
-end
-p "***"
+    puts "▼作品別売上"
+    @sales.title_summary.each do |key, value|
+      puts "・" + key.to_s + ": " + "#{value.to_s(:delimited)}円"
+    end
+    puts ""
 
-p "▼料金タイプ別売上"
-@guest_summary.each do |key, value|
-  puts key.to_s + ": " + "#{value.to_s(:delimited)}円"
+    puts "▼料金タイプ別売上"
+    @sales.guest_summary.each do |key, value|
+      puts "・" + key.to_s + ": " + "#{value.to_s(:delimited)}円"
+    end
+  end
 end
